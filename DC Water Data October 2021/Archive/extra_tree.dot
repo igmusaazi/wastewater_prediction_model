@@ -1,0 +1,33 @@
+digraph Tree {
+node [shape=box, style="rounded", color="black", fontname="helvetica"] ;
+edge [fontname="helvetica"] ;
+0 [label="complete_flow_imp <= 422.9\nsquared_error = 6087.7\nsamples = 62541\nvalue = 312.5"] ;
+1 [label="influent_flow_west_imp <= 80.3\nsquared_error = 2910.9\nsamples = 56338\nvalue = 294.1"] ;
+0 -> 1 [labeldistance=2.5, labelangle=45, headlabel="True"] ;
+2 [label="complete_flow_imp <= 369.2\nsquared_error = 2794.1\nsamples = 14434\nvalue = 260.0"] ;
+1 -> 2 ;
+3 [label="squared_error = 2535.1\nsamples = 13801\nvalue = 256.2"] ;
+2 -> 3 ;
+4 [label="squared_error = 1434.0\nsamples = 633\nvalue = 341.9"] ;
+2 -> 4 ;
+5 [label="complete_flow_imp <= 251.1\nsquared_error = 2412.8\nsamples = 41904\nvalue = 305.8"] ;
+1 -> 5 ;
+6 [label="squared_error = 503.6\nsamples = 5520\nvalue = 220.9"] ;
+5 -> 6 ;
+7 [label="squared_error = 1442.3\nsamples = 36384\nvalue = 318.7"] ;
+5 -> 7 ;
+8 [label="complete_flow_imp <= 494.8\nsquared_error = 3952.1\nsamples = 6203\nvalue = 479.6"] ;
+0 -> 8 [labeldistance=2.5, labelangle=-45, headlabel="False"] ;
+9 [label="performance <= 98.9\nsquared_error = 1909.8\nsamples = 2339\nvalue = 420.9"] ;
+8 -> 9 ;
+10 [label="squared_error = 724.4\nsamples = 1090\nvalue = 381.8"] ;
+9 -> 10 ;
+11 [label="squared_error = 440.9\nsamples = 1249\nvalue = 455.0"] ;
+9 -> 11 ;
+12 [label="performance <= 98.3\nsquared_error = 1842.1\nsamples = 3864\nvalue = 515.1"] ;
+8 -> 12 ;
+13 [label="squared_error = 1505.0\nsamples = 1689\nvalue = 480.7"] ;
+12 -> 13 ;
+14 [label="squared_error = 470.1\nsamples = 2175\nvalue = 541.8"] ;
+12 -> 14 ;
+}

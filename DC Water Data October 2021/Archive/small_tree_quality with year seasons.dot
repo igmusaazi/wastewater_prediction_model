@@ -1,0 +1,33 @@
+digraph Tree {
+node [shape=box, style="rounded", color="black", fontname="helvetica"] ;
+edge [fontname="helvetica"] ;
+0 [label="int_five <= 0.0\nsquared_error = 6047.1\nsamples = 39545\nvalue = 312.7"] ;
+1 [label="nitrate_ppm_imp <= 2.3\nsquared_error = 5071.4\nsamples = 37109\nvalue = 306.3"] ;
+0 -> 1 [labeldistance=2.5, labelangle=45, headlabel="True"] ;
+2 [label="season_Spring <= 0.5\nsquared_error = 3964.6\nsamples = 13810\nvalue = 285.5"] ;
+1 -> 2 ;
+3 [label="squared_error = 3682.7\nsamples = 7106\nvalue = 272.9"] ;
+2 -> 3 ;
+4 [label="squared_error = 3917.4\nsamples = 6704\nvalue = 298.8"] ;
+2 -> 4 ;
+5 [label="ammonia_ppm_imp <= 0.3\nsquared_error = 5319.5\nsamples = 23299\nvalue = 318.7"] ;
+1 -> 5 ;
+6 [label="squared_error = 4530.8\nsamples = 17916\nvalue = 311.1"] ;
+5 -> 6 ;
+7 [label="squared_error = 7109.3\nsamples = 5383\nvalue = 344.1"] ;
+5 -> 7 ;
+8 [label="ammonia_ppm_imp <= 1.0\nsquared_error = 10780.8\nsamples = 2436\nvalue = 409.7"] ;
+0 -> 8 [labeldistance=2.5, labelangle=-45, headlabel="False"] ;
+9 [label="nitrate_ppm_imp <= 3.4\nsquared_error = 10267.3\nsamples = 2056\nvalue = 398.2"] ;
+8 -> 9 ;
+10 [label="squared_error = 10107.3\nsamples = 1947\nvalue = 395.0"] ;
+9 -> 10 ;
+11 [label="squared_error = 9590.4\nsamples = 109\nvalue = 456.5"] ;
+9 -> 11 ;
+12 [label="nitrate_ppm_imp <= 2.7\nsquared_error = 8958.6\nsamples = 380\nvalue = 472.2"] ;
+8 -> 12 ;
+13 [label="squared_error = 10250.2\nsamples = 59\nvalue = 374.7"] ;
+12 -> 13 ;
+14 [label="squared_error = 6889.8\nsamples = 321\nvalue = 488.5"] ;
+12 -> 14 ;
+}
