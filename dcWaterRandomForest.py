@@ -19,6 +19,59 @@ import shap
 from sklearn.tree import export_graphviz
 import pydot
 
+
+data = pd.read_csv('trainAlex.csv')
+
+# Define the SMOGN parameters
+num_synthetic_datasets = 100 ###we create 50 synthetic datasets for plant I and select the best set based on the lowest mse value
+best_mse = float('inf')  # Initialize with a high value
+best_synthetic_data = None
+
+for i in range(num_synthetic_datasets):
+    # Define SMOGN parameters
+    k_values = range(1, 3)  #k-values specifies the number of neighbors to consider for interpolation used in over-sampling
+    pertubs =np.linspace(0.1, 1, 20)  #the amount of perturbation to apply to the introduction of Gaussian Noise.
+    samp_methods = ['extreme', 'balance'] #less over/under sampling or more/over undersampling
+    rel_thres_values = np.linspace(0.1, 1, 20)  # The higher the threshold (values close to 1), the higher the over/under-sampling boundary. 
+    rel_xtrm_types = ['high', 'both'] #specifies region of the response variable y should be considered rare. When high oversampling is done 
+    rel_coef_values = np.linspace(0.1, 5, 30)  # box plot coefficient used to automatically determine extreme and therefore rare "minority" values in y
+    results = []
+
+    k = randrange(1, 5)
+    pertub =uniform(0.1, 0.4)
+    samp_method = choice(['extreme', 'balance'])
+    rel_thres = uniform(0, 1)
+    rel_xtrm_type = choice(['high', 'both'])
+    rel_coef = uniform(0.01, 0.4)
+
+    # Apply SMOGN
+    data_train = smogn.smoter(data=data, y='flow', k=k, samp_method=samp_method, rel_thres=rel_thres,
+                              rel_xtrm_type=rel_xtrm_type,pert=pertub, rel_coef=rel_coef)
+    
+    data_train = data_train.dropna() ###some missing data may be produced; drop it to allow for further analysis
+
+    if not data_train.empty: # avoid having an empty data file after drop some missing information         # Define the features (X) and target (y)
+        X = data_train.drop(columns=['flow'])
+        y = data_train['flow']
+    
+    
+    # Split data into training and test sets
+        XTrain, XTest, yTrain, yTest = train_test_split(X, y, train_size=0.7, test_size=0.3, shuffle=False, stratify=None)
+
+        # Calculate MSE for the test set
+        yTestActual = yTest.values
+        yTestSynthetic = data_train.loc[XTest.index, 'flow'].values
+        if yTestActual.shape != yTestSynthetic.shape:
+            min_length = min(len(yTestActual), len(yTestSynthetic))
+            yTestActual = yTestActual[:min_length]
+            yTestSynthetic = yTestSynthetic[:min_length]
+            mse = np.mean((yTestActual - yTestSynthetic) ** 2)
+
+            if mse < best_mse:
+                best_mse = mse
+                best_synthetic_data = data_train.copy()  
+best_synthetic_data.to_csv("best_synthetic_data.csv", index=False)  # save the best synthetic dataset to a CSV file
+
 ####preliminary correlation between variable to be used in the model - spearman's correlation################
 dcBlue = pd.read_csv('../DC Water Data October 2021/dcWaterStorms(October 2021)/BluePlainsFinal_Update(March22).csv') ##effluent quality and precipitation
 dcBlue['datetime'] = pd.to_datetime(dcBlue['datetime'])
