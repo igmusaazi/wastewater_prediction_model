@@ -1,31 +1,30 @@
-"""
-This script is used to develop a random forest model to predict influent flows based on precipitation, annual seasons, time of the day,
-effluent water quality measurements. 
-...
-
-Author: 
-    Isaac Musaazi 
-Latest version: 
-    March 20, 2022 @ 2p.m
-"""
+#############################################
+##Develop ML models that can predict influent flows to a plant based on precipitation, annual seasons,
+water quality measurements
+#############################################
+Author: Isaac Musaazi 
+Latest version:  Oct 20, 2023
+############################################
 import pandas as pd
 import numpy as np
 import scipy.stats
 import smogn  ##synthetic minority over-sampling for  regression 
-from sklearn.model_selection import TimeSeriesSplit
 from sklearn.model_selection import GridSearchCV
 from sklearn.ensemble import RandomForestRegressor
+import matplotlib.pyplot as plt
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import BayesianRidge
+from xgboost import XGBRegressor
 import shap
-from sklearn.tree import export_graphviz
-import pydot
 
 
 data = pd.read_csv('trainAlex.csv')
 
 # Define the SMOGN parameters
-num_synthetic_datasets = 100 ###we create 50 synthetic datasets for plant I and select the best set based on the lowest mse value
+num_synthetic_datasets = 50 ###create 50 synthetic datasets for plant I and select the best one set based on the lowest mse value
 best_mse = float('inf')  # Initialize with a high value
-best_synthetic_data = None
+selected_synthetic_data = None
 
 for i in range(num_synthetic_datasets):
     # Define SMOGN parameters
@@ -54,7 +53,6 @@ for i in range(num_synthetic_datasets):
         X = data_train.drop(columns=['flow'])
         y = data_train['flow']
     
-    
     # Split data into training and test sets
         XTrain, XTest, yTrain, yTest = train_test_split(X, y, train_size=0.7, test_size=0.3, shuffle=False, stratify=None)
 
@@ -69,9 +67,7 @@ for i in range(num_synthetic_datasets):
 
             if mse < best_mse:
                 best_mse = mse
-                best_synthetic_data = data_train.copy()  
-best_synthetic_data.to_csv("best_synthetic_data.csv", index=False)  # save the best synthetic dataset to a CSV file
-
+                selected_synthetic_data = data_train.copy()  
 ####preliminary correlation between variable to be used in the model - spearman's correlation################
 dcBlue = pd.read_csv('../DC Water Data October 2021/dcWaterStorms(October 2021)/BluePlainsFinal_Update(March22).csv') ##effluent quality and precipitation
 dcBlue['datetime'] = pd.to_datetime(dcBlue['datetime'])
