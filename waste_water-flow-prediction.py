@@ -18,16 +18,99 @@ from sklearn.linear_model import BayesianRidge
 from xgboost import XGBRegressor
 import shap
 
+data = pd.read_csv('your_data_file.csv')  # assume that data for developing a prediction model is from a CSV file
+data['date'] = pd.to_datetime(data['date']) # time series data requires to convert the date column to datetime
+data.set_index('date', inplace=True)
+data = pd.get_dummies(data, prefix=None, drop_first=True) #drop one of the dummy variables. season of the year was the categorial variable
 
-data = pd.read_csv('trainAlex.csv')
+#Time based train-test split################
+test_data = 290    #split the data to preserve the temporal order. Testing data comes from later time periods. For Plant I, 290 data points were considered in the testing set
+train_data = data[:-test_data] #training data comes from the earlier time periods
+test_data = data[-test_data:]
 
-# Define the SMOGN parameters
-num_synthetic_datasets = 50 ###create 50 synthetic datasets for plant I and select the best one set based on the lowest mse value
-best_mse = float('inf')  # Initialize with a high value
-selected_synthetic_data = None
+train_labels = train_data['flow'] # extract labels -  in this study 'flow'
+test_labels = test_data['flow']
 
-for i in range(num_synthetic_datasets):
-    # Define SMOGN parameters
+
+###some data preprocessing and handling censored values for training set###
+train_data['censoring'] = train_data['variable'].apply(lambda x: 0 if '<' not in x and '>' not in x else (1 if '<' in x else 2))
+train_data['variable'] = train_data['variable'].str.replace('[<>]', '', regex=True).astype(float) #variable was NOx for Plant I
+### mean and standard deviation values obtained from R using the enorm censored package 
+mean_value = 0.03
+std_value = 0.01
+
+censored_positions = (train_data.censoring == 1) # determine censored value positions
+num_censored = censored_positions.sum() # calculate the number of censored values that are needed
+random_values = np.random.normal(mean_value, std_value, num_censored) # generate those random values to replace the censored numbers. Assume these random values come from a normal distribution
+
+###creating additional features from rainfall data to provide more information to the prediciton models and potentially improve predictive performance. 
+#here the  count resets when the rainfall exceeds 0.04, and it increments for each day without significant rainfall
+##This should result in a continuous progression of antecedent dry day (ADD)
+#the "ADD" column is created in the training set. It counts the number of days before each rainfall event and resets the count when a rainfall event is observed. 
+
+count_rain = 0
+ADD = []
+
+for rainfall in train_data['rainfall']:  # Iterate through the 'rainfall' column
+    if rainfall <= 0.04:
+        count_rain += 1  # Increment the count for each day without significant rainfall
+    else:
+        count_rain = 0  # Reset the count when rainfall exceeds 0.04
+    ADD.append(count_rain)
+
+train_data['ADD'] = ADD ##we have an additional variable in the training set
+
+
+######handling missing data, particularly Plant II the imputation on train and test set is separate#####################
+cols = ['feature_1', 'feature_2', 'feature_3', 'feature_4', 'target', 'ADD', 'season_1', 'season_2', 'season_3'] # define columns to be used for imputation
+
+imputation = IterativeImputer(estimator=KNeighborsRegressor(), max_iter=1000, tol=1e-1) # Create an IterativeImputer
+
+for data in [train_data]:
+    # Extract the columns from the data for imputation and perform imputation and update the train data
+    X = data[cols] 
+    imputed_values = imputation.fit_transform(X)
+    imputed_df = pd.DataFrame(imputed_values, columns=X.columns) # Create a DataFrame with the imputed values
+    for col in cols:
+        data[col] = imputed_df[col]
+
+for data in [test_data]:
+    X = data[cols]
+    imputed_values = imputation.fit_transform(X)
+    imputed_df = pd.DataFrame(imputed_values, columns=X.columns)
+
+    for col in cols:
+        data[col] = imputed_df[col]    
+
+
+####combine the train and test sets and perform some preliminary analysis#####
+###here the correlation coefficients using spearman are completed########
+###Table SX and Table SXX########
+combined_data = pd.concat([train_data, test_data], axis=0)
+spear_corr = combined_data.corr(method='spearman', min_periods=2)
+correlation_matrix, p_values = scipy.stats.spearmanr(a=combined_data, b=None, axis=0)
+
+coefficients_matrix = pd.DataFrame(correlation_matrix)
+p_values = pd.DataFrame(p_values)
+
+####################################
+## streamline process for model selection and evaluation using pyCaret### 
+##remember to install this package on your local machine#########
+#################################
+##check perfomrmance of different regression models based on training time and OAI. OAI is computed separately based on R2, RMSE, MAE (see Equation 1 in the paper)
+model_selection = setup(data =combined_data , target = 'flow',preprocess=False,session_id = 123, normalize= True) #no preprocessing is required
+best_models = compare_models()
+model_results = pull()   ####ranks best to worst model based on the R2
+
+
+###SMOGN algorithm is used to handle the skewed distribution of the target variable ('flow') 
+##want to improve the ability of the modelsto predict rare cases effectively
+num = 50 ###create 50 synthetic datasets and select the best set based on the lowest mse value and the lowest zero count for the dummy variables
+best_mse = float('inf')  # initialize to a high value
+synthetic_set = None
+columns = ['seasonSpring', 'seasonSummer', 'seasonWinter']
+
+for i in range(num):
     k_values = range(1, 3)  #k-values specifies the number of neighbors to consider for interpolation used in over-sampling
     pertubs =np.linspace(0.1, 1, 20)  #the amount of perturbation to apply to the introduction of Gaussian Noise.
     samp_methods = ['extreme', 'balance'] #less over/under sampling or more/over undersampling
@@ -42,208 +125,325 @@ for i in range(num_synthetic_datasets):
     rel_thres = uniform(0, 1)
     rel_xtrm_type = choice(['high', 'both'])
     rel_coef = uniform(0.01, 0.4)
-
-    # Apply SMOGN
-    data_train = smogn.smoter(data=data, y='flow', k=k, samp_method=samp_method, rel_thres=rel_thres,
+    synthetic_sets = [] 
+    data_train = smogn.smoter(data=train_data, y='flow', k=k, samp_method=samp_method, rel_thres=rel_thres,
                               rel_xtrm_type=rel_xtrm_type,pert=pertub, rel_coef=rel_coef)
     
-    data_train = data_train.dropna() ###some missing data may be produced; drop it to allow for further analysis
+    data_train = data_train.dropna() ###some missing data may be produced; drop it to allow the synthetic generation to complete
 
-    if not data_train.empty: # avoid having an empty data file after drop some missing information         # Define the features (X) and target (y)
+    if not data_train.empty: # avoids having an empty data file after dropping some missing information   # Define the features (X) and target (y)
         X = data_train.drop(columns=['flow'])
         y = data_train['flow']
+    
     
     # Split data into training and test sets
         XTrain, XTest, yTrain, yTest = train_test_split(X, y, train_size=0.7, test_size=0.3, shuffle=False, stratify=None)
 
-        # Calculate MSE for the test set
-        yTestActual = yTest.values
+
+        yTestActual = yTest.values         # calculate MSE for the test set
         yTestSynthetic = data_train.loc[XTest.index, 'flow'].values
         if yTestActual.shape != yTestSynthetic.shape:
             min_length = min(len(yTestActual), len(yTestSynthetic))
             yTestActual = yTestActual[:min_length]
             yTestSynthetic = yTestSynthetic[:min_length]
             mse = np.mean((yTestActual - yTestSynthetic) ** 2)
+            zero_count = data_train[columns].apply(lambda col: col.tolist().count(0)).sum()
+             
+            synthetic_sets.append((data_train.copy(), mse, zero_count))
 
-            if mse < best_mse:
-                best_mse = mse
-                selected_synthetic_data = data_train.copy()  
-####preliminary correlation between variable to be used in the model - spearman's correlation################
-dcBlue = pd.read_csv('../DC Water Data October 2021/dcWaterStorms(October 2021)/BluePlainsFinal_Update(March22).csv') ##effluent quality and precipitation
-dcBlue['datetime'] = pd.to_datetime(dcBlue['datetime'])
+if synthetic_sets:
+    synthetic_sets.sort(key=lambda x: x[2]) # sort based on the number of zeros in the columns of interest (dummy variables - seasons)
 
-dcBlue = pd.get_dummies(dcBlue, prefix=None)
-dcBlueCorr = dcBlue[['mean_prcp', 'influent_flow', 
-'ammonia_ppm', 'nitrate_ppm', 'nitrite_ppm', 'season_Fall', 'season_Spring', 'season_Summer', 'season_Winter','timeDay_Afternoon', 'timeDay_Evening', 'timeDay_Morning', 'timeDay_Night']] 
-spear = dcBlueCorr.corr(method='spearman', min_periods =2) #min periods is the minimum pair of observations for a valid result
-dcBlueCorrMtrx = scipy.stats.spearmanr(a=dcBlueCorr,b=None, axis=0)
-coefMatrx = pd.DataFrame(dcBlueCorrMtrx[0])
-pvalues = pd.DataFrame(dcBlueCorrMtrx[1])
-#coefMatrx.to_csv('dcBluespearman(March2022).csv')
-# =============================================================================
-########cross correlation###########
-dcBlue = dcBlue.drop(['Unnamed: 0','Unnamed: 9', 'Unnamed: 10', 'Unnamed: 11'], axis =1)
+    best_synthetic_data, best_mse, best_zero_count = synthetic_sets[0] # choose set with the lowest zero count as the best synthetic dataset
+    
+    def remove_zeros(data): # remove columns with zero counts
+        columns = [col for col in data.columns if data[col].sum() == 0]
+        data.drop(columns=columns, inplace=True)
 
-fields = ['datetime','influent_flow_imp','mean_prcp','ammonia_ppm_imp', 'nitrate_ppm_imp', 'nitrite_ppm_imp']
-x =dcBlue[fields]
-def df_derived_by_shift(df,lag=0,NON_DER=[]):
-    df = df.copy()
-    if not lag:
-        return df
-    cols ={}
-    for i in range(1,lag+1):
-        for x in list(df.columns):
-            if x not in NON_DER:
-                if not x in cols:
-                    cols[x] = ['{}_{}'.format(x, i)]
-                else:
-                    cols[x].append('{}_{}'.format(x, i))
-    for k,v in cols.items():
-        columns = v
-        dfn = pd.DataFrame(data=None, columns=columns, index=df.index)
-        i = 1
-        for c in columns:
-            dfn[c] = df[k].shift(periods=i)
-            i+=1
-        df = pd.concat([df, dfn], axis=1).reindex(df.index)
-    return df
-
-NON_DER = ['datetime',]
-
-df_new = df_derived_by_shift(x, 6, NON_DER)
-df_new = df_new.dropna()
-crosstest = df_new.corr()
-laggedvalues = ['datetime','influent_flow_imp','mean_prcp_3','ammonia_ppm_imp_3', 'nitrate_ppm_imp_3', 'nitrite_ppm_imp_3']
-dcBlue2=df_new[laggedvalues]
-dcNew = pd.merge(left =dcBlue,right = dcBlue2, left_on = 'datetime', right_on ='datetime') #column merge based on 'DateRead'
-d2New = dcNew.loc[:, ['datetime', 'influent_flow_imp_x', 'mean_prcp_3','ammonia_ppm_imp_3', 'nitrate_ppm_imp_3', 'nitrite_ppm_imp_3','event', 'season']]
-
-##define duplicates and plot ############
-dcBlue2= dcBlue.groupby(['ammonia_ppm_imp', 'nitrate_ppm_imp', 'nitrite_ppm_imp','Time']).size().reset_index(name='count')
+    remove_zeros(best_synthetic_data)  
 
 
-### random forest regressor ###############
-dcBlue = pd.read_csv('../DC Water Data October 2021/dcWaterStorms(October 2021)/BluePlainsFinal_Lag(March22).csv') ##effluent quality and precipitation
-dcBlue['datetime'] = pd.to_datetime(dcBlue['datetime'])
-dcBlue = pd.get_dummies(dcBlue, prefix=None)
+########model development using train and test data#####################
+###use the train set without resampling and the train set with synthetic data separately####
+##get the performance of the models for these different set by testing on the same test set###############
+models = [
+    ('Linear Regression', LinearRegression(), {}),
+    
+    ('k Nearest Neighbors',  KNeighborsRegressor(),
+     {'n_neighbors': [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+    'weights': ['uniform', 'distance'],
+    'metric': ['euclidean', 'manhattan']}),
+    
+    ('Random Forest', RandomForestRegressor(), {
+        'n_estimators': [10, 20, 30, 40],
+    'max_depth': [1, 2, 3, 4],
+    }),
+    
+    ('BayesianRidge', BayesianRidge(), {
+        'alpha_1': [1e-3, 1e-2,1e-1, 1, 10, 100],
+    'alpha_2': [1e-3, 1e-2,1e-1, 1, 10, 100],
+    'n_iter': [10,50, 100],
+    'tol': [1e-3, 1e-2, 1e-1]
+}),
+    ('XGBoost', xgb.XGBRegressor(),
+     {'n_estimators': [10, 20, 30, 50, 100],
+    'max_depth': [1, 2, 3, 4, 5],
+    'learning_rate': [0.01, 0.1, 0.2]
+      })
+]
+results  = pd.DataFrame()
+results_parameters = pd.DataFrame() ##different model hyperparameters
 
-####train test split not random accuracy testdata = 10% ################
-test_data = 1389
-train_dcBlue = dcBlue[:-test_data]
-valid_dcBlue=train_dcBlue.iloc[-500:]
-train_dcBlue= pd.concat([train_dcBlue, valid_dcBlue]).drop_duplicates(keep=False).copy()
-test_dcBlue=dcBlue[-test_data:]
+scaler = StandardScaler()  #use standard scaler for the data
+X_train_scaled = scaler.fit_transform(train_data)
+X_test_scaled = scaler.transform(test_data)
 
-train_labels = train_dcBlue['influent_flow']
-valid_labels = valid_dcBlue['influent_flow']
-test_labels = test_dcBlue['influent_flow']
+for model_name, model, param_grid in models:
 
-valid_dcBlue = valid_dcBlue.drop(['Unnamed: 0','datetime','influent_flow'], axis =1)
+    grid_search = GridSearchCV(estimator=model, param_grid=param_grid,
+                               scoring='neg_mean_squared_error', cv=5, n_jobs=-1)
+
+    grid_search.fit(X_train_scaled, train_labels)
+    best_params = grid_search_resampled.best_params_
+    best_model = grid_search_resampled.best_estimator_
+    predictions = best_model_resampled.predict(X_test_scaled)
+
+    best_params_str = ', '.join([f"{key}: {val}" for key, val in best_params.items()])
+    results_parameters[model_name + ' Best Parameters'] = [best_params_str]
 
 
-#######suitable set of hyperparametersusing grid search balanced#########
-params = {
-    'n_estimators': [1000, 2000, 3000, 4000, 5000],
-    'min_samples_split': [100, 200, 500, 1000, 2000],
-    'max_features': [2, 3, 4, 5, 6, 8]
+    prediction_std = np.std(predictions)
+    z_score = 1.96  # Corresponds to a 95% confidence interval
+    prediction_interval = z_score * (prediction_std / np.sqrt(len(test_labels)))
+    upper_bound = y_pred_resampled + prediction_interval
+    lower_bound = y_pred_resampled - prediction_interval
+    r2_resampled = r2_score(test_labels, y_pred_resampled)
+    mse_resampled = mean_squared_error(test_labels, y_pred_resampled)
+
+    results[model_name + ' Predictions'] = y_pred_resampled
+    results[model_name + ' Upper Bound'] = upper_bound
+    results[model_name + ' Lower Bound'] = lower_bound
+    results[model_name, 'MSE'] = mse_resampled
+    results[model_name, 'R2'] = r2_resampled
+
+
+########figure SX################################
+def cum_plot(data):
+    '''plot the cumulative distribution function to determine the flow rate that constitutes
+    a rare events. The 99th percentile is used as the cutoff'''
+    
+    counts, bins = np.histogram(combined_data['flow'], bins = 10)
+    pdf = counts / sum(counts)  
+    cdf = np.cumsum(pdf)
+            
+    plt.xlabel('Flow in MGD', size = 15)
+    plt.ylabel('Cumulative Probability', size = 15)
+    plt.title('Cumulative Probability and Flow') 
+    plt.plot(bins[1:],pdf, color="red", label="PDF")
+    plt.plot(bins[1:], cdf, label="CDF")
+    plt.axhline(y = 0.99, color='k', linestyle='dashed',label = '99th percentile')
+    plt.axvline(x=(np.percentile(combined_data['flow'],99)), color='r', linestyle='dashdot', label = 'Influent Flow Threshold')
+    plt.legend()
+    return plt.savefig('figure SXx.png', dpi = 1200)
+
+
+#########Figure SX############################
+model = 'XGBoost'  # Replace with your specific model
+def y_formatter(y, pos):
+  return abs(y)  # Custom y-axis label formatter to remove the negative sign
+
+fig, (ax1,ax2) = plt.subplots(1,2, figsize=(10, 5))
+ax1.plot('date', 'flow', label='measured flow', linestyle='solid', data=predictions_resampled, color='black')
+ax1.plot('date', model, ls='solid', label=f'baseline flow', data=predictions, color='orange')
+ax1.plot('date', model, ls='--', label=f'predicted flow (resampled)', data=predictions_resampled, color='green')
+ax1.set_ylabel('influent flow (million gallons per day)')
+ax1.set_xlim([date.date(2020, 2, 1), date.date(2020, 12, 31)])
+date_form = mdates.DateFormatter('%m-%d')
+ax1.xaxis.set_major_formatter(date_form)
+week = mdates.WeekdayLocator(interval=3)
+day = mdates.DayLocator()
+ax1.xaxis.set_major_locator(week)
+ax1.tick_params(axis='x', labelsize=10, rotation=45)
+#ax1.legend(prop={"size": 8},loc='center left',bbox_to_anchor=(0.4, 0.5),frameon=False)
+ax1.set_title('Plant I', fontsize=12)
+ax2_1 = ax1.twinx()
+ax2_1.bar(predictions['date'], -predictions['rainfall'], color='tab:blue', alpha=0.8, label='rainfall')
+#ax2_1.legend(prop={"size": 8},loc='center left',bbox_to_anchor=(0.4, 0.4),frameon=False)
+#ax2_1.set_ylabel('Rainfall')
+ax2_1.yaxis.set_major_formatter(FuncFormatter(y_formatter))
+rainfall_max = -max(predictions['rainfall'])
+flow_max = max(predictions_resampled['flow'])
+ax2_1.set_ylim(rainfall_max * 2, 0)
+ax1.set_ylim(25, flow_max * 1.5)
+
+ax2.plot('date', 'flow', label='measured flow', linestyle='solid', data=predictions_resampled_houston, color='black')
+ax2.plot('date', model, ls='solid', label=f'baseline flow', data=predictions_houston, color='orange')
+ax2.plot('date', model, ls='--', label=f'predicted flow (resampled)', data=predictions_resampled_houston, color='green')
+#ax2.set_ylabel('influent flow (million gallons per day)')
+ax2.set_xlim([date.date(2018, 9, 24), date.date(2019, 6, 30)])
+date_form = mdates.DateFormatter('%m-%d')
+ax2.xaxis.set_major_formatter(date_form)
+week = mdates.WeekdayLocator(interval=3)
+day = mdates.DayLocator()
+ax2.xaxis.set_major_locator(week)
+ax2.tick_params(axis='x', labelsize=10, rotation=45)
+ax2.legend(prop={"size": 8},loc='center left',bbox_to_anchor=(0.2, 0.5),frameon=False)
+ax2.set_title('Plant II', fontsize=12)
+
+# Create a shared secondary y-axis for the bar plot
+ax2_2= ax2.twinx()
+
+# Bar plot on the secondary y-axis without the negative sign
+ax2_2.bar(predictions_houston['date'], -predictions_houston['rainfall'], color='tab:blue', alpha=0.8, label='rainfall')
+ax2_2.legend(prop={"size": 8},loc='center left',bbox_to_anchor=(0.2, 0.4),frameon=False)
+ax2_2.set_ylabel('Rainfall')
+ax2_2.yaxis.set_major_formatter(FuncFormatter(y_formatter))
+rainfall_max = -max(predictions_houston['rainfall'])
+flow_max = max(predictions_resampled_houston['flow'])
+ax2_2.set_ylim(rainfall_max * 2.5, 0)
+ax2.set_ylim(0.5, flow_max * 2)
+plt.savefig('Fig XX.png',dpi=1200)
+
+
+
+#########Figure 2 ###############################
+model_colors = {
+    'linearReg': 'orange',
+    'kNearest': 'blue',
+    'RandomForest': 'red',
+    'BayesianRidge': 'green',
+    'XGBoost': 'purple'
 }
 
-rf_gridsearch = GridSearchCV(
-    estimator = RandomForestRegressor(random_state=42),
-    param_grid=params,
-    cv=5,
-    n_jobs = -1,
-    scoring='neg_mean_absolute_error',
-    verbose=1,
-    error_score='raise'
-)
+fig, ((ax_main1, ax_zoom1), (ax_main2, ax_zoom2)) = plt.subplots(2, 2, figsize=(18, 10), sharex='col')
 
-rf_gridsearch.fit(valid_dcBlue, valid_labels)
-rf_gridsearch.best_estimator_
-rf_gridsearch.best_score_
+r2_values_col1 = {model: [] for model in model_colors}
+mse_values_col1 = {model: [] for model in model_colors}
+r2_values_col2 = {model: [] for model in model_colors}
+mse_values_col2 = {model: [] for model in model_colors}
 
-###training dataset not balanced ##########
-rf = RandomForestRegressor(max_features=8, min_samples_split=100, n_estimators=2000, random_state=42).fit(train_dcBlue, train_labels) ##not balanced
+def calculate_regression_stats(x, y):
+    slope, intercept, r_value, p_value, std_err = linregress(x, y)
+    r_squared = r_value**2
+    mse = np.mean((y - (slope * x + intercept))**2)
+    return slope, intercept, r_squared, mse
 
-train_predictions = rf.predict(train_dcBlue)
-train_errors = abs(train_predictions - train_labels)
-train_mape = 100 * (train_errors / train_labels)   #performance metrics
-train_mae = np.mean(train_errors) #mean absolute error
-train_accuracy = 100 - np.mean(train_mape)
+x_min, x_max, y_min, y_max = 20, 100, 20, 100
+col1 = ['linearReg', 'kNearest', 'RandomForest', 'BayesianRidge', 'XGBoost']
+col2 = ['linearReg','kNearest', 'RandomForest', 'BayesianRidge', 'XGBoost']
 
-test_predictions = rf.predict(test_dcBlue)
-test_errors = abs(test_predictions - test_labels)
-test_mape = 100 * (test_errors / test_labels)   #performance metrics
-test_mae = np.mean(test_errors) #mean absolute error
-test_accuracy = 100 - np.mean(test_mape)
+# Loop through the columns of the predictions data for the first set of regressions (col1)
+for col in col1:
+    x = predictions.flow
+    y = predictions[col]
 
-#####balancing dataset SMOGN ##########
-train_dcBlue = train_dcBlue.drop(['Unnamed: 0','datetime'], axis =1)
+    slope, intercept, r_squared, mse = calculate_regression_stats(x, y)
+    r2_values_col1[col].append(r_squared)
+    mse_values_col1[col].append(mse)
+    color = model_colors[col]
+    marker_size = 10
 
-influent_smogn = smogn.smoter(data = train_dcBlue,  y = 'influent_flow',\
-                      k=7,samp_method = 'balance',rel_thres =0.8,rel_method='auto',rel_xtrm_type = 'both', rel_coef = 1.5).copy() 
+    # Plot the scatter plots and regression lines on the first main subplot
+    ax_main1.scatter(x, y, label=f"{col}: R²={r_squared:.2f}", c=color, s=marker_size)
+    #ax_main1.scatter(x, y, label=f"{col}: mse={mse:.2f}", c=color, s=marker_size)
+    ax_main1.plot(x, slope * x + intercept, c=color)
+    ax_main1.plot([0, 100], [0, 100], linestyle='--', color='black')
+    ax_main1.set_ylabel("predicted flow (million gallons per day)")
+    ax_main1.set_title("Plant I -baseline ")
+    ax_main1.legend(frameon=False, fontsize=10)
+    ax_main1.set_xlim(x_min, x_max)
+    ax_main1.set_ylim(y_min, y_max)
+    ax_zoom1.set_xlim(50, 80)
+    ax_zoom1.set_ylim(50, 80)
+    zoom_rect1 = plt.Rectangle((x_min, y_min), x_max - x_min, y_max - y_min, fill=False, color='0.3', linewidth=2)
+    ax_main1.add_patch(zoom_rect1)
+    ax_main1.indicate_inset_zoom(ax_zoom1)
+    ax_zoom1.scatter(x, y,c=color)
+    ax_zoom1.plot(x, slope * x + intercept,label=f"{col}", linestyle='-', linewidth=3,c=color)
+    ax_zoom1.legend(frameon=False, fontsize=10)
+    ax_zoom1.plot([50, 80], [50, 80], linestyle='--', color='black')
+    ax_zoom1.text(74, 78, '1:1 Line', fontsize=12, color='black')
 
-trainBal = pd.read_csv('../DC Water Data October 2021/TrainingBalanced(March22).csv')
-trainBal_labels = trainBal['influent_flow']
-trainBal = trainBal.drop(['Unnamed: 0','influent_flow'], axis =1)
+for col in col2:
+    x = predictions_resampled.flow
+    y = predictions_resampled[col]
 
-###training dataset balanced ##########
-rfBal = RandomForestRegressor(max_features=8, min_samples_split=1000, n_estimators=2000, random_state=42).fit(trainBal, trainBal_labels) ##balanced
+    slope, intercept, r_squared, mse = calculate_regression_stats(x, y)
 
+    r2_values_col2[col].append(r_squared)
+    mse_values_col2[col].append(mse)
+    color = model_colors[col]
+    marker_size = 10
 
-trainBal_predictions = rfBal.predict(trainBal)
-trainBal_errors = abs(trainBal_predictions - trainBal_labels)
-trainBal_mape = 100 * (trainBal_errors / trainBal_labels)   #performance metrics
-trainBal_mae = np.mean(trainBal_errors) #mean absolute error
-trainBal_accuracy = 100 - np.mean(trainBal_mape)
-
-test_dcBlue = test_dcBlue.drop(['Unnamed: 0','datetime','influent_flow'], axis =1)
-test_predictions = rfBal.predict(test_dcBlue)
-test_errors = abs(test_predictions - test_labels)
-test_mape = 100 * (test_errors / test_labels)   #performance metrics
-test_mae = np.mean(test_errors) #mean absolute error
-test_accuracy = 100 - np.mean(test_mape)
+    # Plot the scatter plots and regression lines on the second main subplot
+    ax_main2.scatter(x, y, label=f"{col}: R²={r_squared:.2f}", c=color, s=marker_size)
+    #ax_main2.scatter(x, y, label=f"{col}: mse={mse:.2f}", c=color, s=marker_size)
+    ax_main2.plot(x, slope * x + intercept, c=color)
+    ax_main2.plot([0, 100], [0, 100], linestyle='--', color='black')
+    # Customize the main plots for both sets of regressions (same as before)
+    #ax_main1.set_xlabel("measured flow (million gallons per day)")
 
 
-##################prediction interval (80%)############# https://andrewpwheeler.com/2022/02/04/prediction-intervals-for-random-forests/
-test_pred = pd.DataFrame(test_predictions, columns = ['influent_pred']) #convert array to dataframe
-resid = trainBal_labels - rfBal.oob_prediction_
-lowq = resid.quantile(0.1)
-higq = resid.quantile(0.9)
+    ax_main2.set_xlabel("measured flow (million gallons per day)")
+    ax_main2.set_ylabel("predicted flow (million gallons per day)")
+    ax_main2.set_title("Plant I  - resampled")
+
+    # Add legends to the main plots for both sets of regressions
+
+    ax_main2.legend(frameon=False, fontsize=10)
+
+# Set the zoomed-in portions for both main plots (same as before)
+    ax_main2.set_xlim(x_min, x_max)
+    ax_main2.set_ylim(y_min, y_max)
 
 
-####contribution of input variables on the prediction of influent. caution: use small sample size##########
-test_dcBlue4 = test_dcBlue.rename(columns = {'mean_prcp':'rainfall','ammonia_ppm':'effluent_ammonia','nitrate_ppm':'effluent_nitrate', 'nitrite_ppm':'effluent_nitrite','timeDay_Morning':'morning_time'
-                                            ,'timeDay_Afternoon':'afternoon_time', 'timeDay_Evening':'evening_time','timeDay_Night':'night_time'})
+    # Customize the zoomed-in subplots for both sets of regressions (same as before)
+    #ax_zoom1.set_xlabel("measured flow")
+    #ax_zoom1.set_ylabel("predicted flow")
+    #ax_zoom1.set_title("Zoom In - Set 1")
 
-explainer = shap.TreeExplainer(rfBal, feature_perturbation='tree_path_dependent')
-shap_values = explainer.shap_values(test_dcBlue4)
-shap_obj = explainer(test_dcBlue4)
-shap.plots.bar(shap_obj, show= 'True')
-plt.savefig('beeswarmplotNoBal.png', dpi =1200)
+    ax_zoom2.set_xlabel("measured flow (million gallons per day)")
+    #ax_zoom2.set_ylabel("predicted flow")
+    #ax_zoom2.set_title("Zoom In - Set 2")
+    ax_zoom2.set_xlim(50, 80)
+    ax_zoom2.set_ylim(50, 80)
 
-rf = RandomForestRegressor(max_features=8, min_samples_split=100, n_estimators=2000, max_depth = 3, random_state=42).fit(train_dcBlue, train_labels) ##not balanced
-tree_small = rf.estimators_[5]
+    # Add rectangles to indicate the zoomed-in areas for both sets of regressions (same as before)
+    zoom_rect2 = plt.Rectangle((x_min, y_min), x_max - x_min, y_max - y_min, fill=False, color='0.3', linewidth=2)
+    ax_main2.add_patch(zoom_rect2)
+    ax_main2.indicate_inset_zoom(ax_zoom2)
+    # Plot the 1:1 lines on both zoomed-in subplots (same as before)
+    ax_zoom2.scatter(x, y,c=color)
+    ax_zoom2.plot(x, slope * x + intercept, label=f"{col}",linestyle='-', linewidth=3,c=color)
+    ax_zoom2.plot([50, 80], [50, 80], linestyle='--', color='black', label='1:1 Line')
+#plt.show()
+plt.savefig('FigX.png',bbox_inches='tight',dpi=2000)
 
-dcBluefeatures_list = list(train_dcBlue.columns) ##save features names
-export_graphviz(tree_small, out_file = 'small_tree_quality.dot', feature_names = dcBluefeatures_list, rounded = True, precision = 1)
-(graph, ) = pydot.graph_from_dot_file('small_tree_quality.dot')
-graph.write_png('small_tree_quality.png')
+#########these model hyperparameters are obtained from the grid search. These should be different for the baseline and resampled training data#########
+#best_knn_model = KNeighborsRegressor(metric=manhattan, n_neighbors=10, weights=distance)
+best_random_forest_model = RandomForestRegressor(max_depth=4, n_estimators=10)
+best_bayesian_ridge_model = BayesianRidge(alpha_1=100, alpha_2=0.001, n_iter= 10, tol= 0.001)
+best_xgboost_model = xgb.XGBRegressor(learning_rate=0.2, max_depth=4, n_estimators=100)
 
-importances = list(rf.feature_importances_)
-feature_importances = [(feature, round(importance, 2)) for feature, importance in zip(dcBluefeatures_list, importances)]
-feature_importances = sorted(feature_importances, key = lambda x: x[1], reverse = True)
-# =============================================================================
-# baseline_preds = test_dcBlue[:, dcBluefeatures_list.index('average')]  ##baseline to check quality of predictions
-# baseline_errors = abs(baseline_preds - test_labels)
-#  regressor = RandomForestRegressor(n_estimators=20, random_state=0)
-# regressor.fit(X_train, y_train)
-# y_pred = regressor.predict(X_test)
-# print('Mean Absolute Error:', metrics.mean_absolute_error(y_test, y_pred))
-# print('Mean Squared Error:', metrics.mean_squared_error(y_test, y_pred))
-# print('Root Mean Squared Error:', np.sqrt(metrics.mean_squared_error(y_test, y_pred)))
-# 
-# =============================================================================
-######separate out night and wet#########
-dcNight = dcBlue[(dcBlue['influent_flow'] >= 0) & (dcBlue['timeDay'] == 'Night')]
-dcWet = dcBlue[(dcBlue['influent_flow'] >= 0) & (dcBlue['event_Wet'] == 1)]
+
+#################Figure XX #########################3
+models = [
+    ('Random Forest', best_random_forest_model),
+    ('Bayesian Ridge', best_bayesian_ridge_model),
+    ('XGBoost', best_xgboost_model)
+]
+shap_values_list = []
+for model_name, model in models:
+    model.fit(X_train_scaled, train_labelsBal)
+
+    explainer = shap.Explainer(model, X_train_scaled)
+    shap_values = explainer.shap_values(X_test_scaled)
+
+    shap_values_list.append(shap_values)
+    feature_names = train_alexRenew.columns.tolist()
+for idx, (model_name, shap_values) in enumerate(zip([model[0] for model in models], shap_values_list)):
+    plt.figure()
+    shap.summary_plot(shap_values, X_test_scaled, feature_names=feature_names, title=f'{model_name} Shapley Summary Plot')
+    # Save the plot with a unique name (optional)
+    plt.savefig(f'shap_summary_plot_{idx}.png', bbox_inches='tight',dpi=2000)
+    plt.close('all')
